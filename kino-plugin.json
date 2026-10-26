@@ -1,0 +1,37 @@
+{
+  "id": "cosxplay",
+  "name": "CosXplay",
+  "version": "1.0.0",
+  "apiVersion": 6,
+  "entry": "plugin.js",
+  "description": "Cosplay de cosxplay.com. Solo +18. Home con tags favoritos y fila 2B. MP4 high/low y navegador oculto.",
+  "author": "community",
+  "homepage": "https://cosxplay.com",
+  "icon": "icon.png",
+  "hosts": [
+    "cosxplay.com",
+    "www.cosxplay.com",
+    "*.cosxplay.com",
+    "nosofiles.com",
+    "*.nosofiles.com",
+    "xcdn1.nosofiles.com",
+    "st1.nosofiles.com"
+  ],
+  "streamHosts": "any",
+  "browser": true,
+  "capabilities": ["search", "home", "browse", "resolve"],
+  "categories": ["adult"],
+  "color": "#AD1457",
+  "settings": [
+    {
+      "key": "quality",
+      "label": "Calidad preferida",
+      "type": "select",
+      "default": "high",
+      "options": [
+        { "value": "high", "label": "Alta (high)" },
+        { "value": "low", "label": "Baja (ahorro de datos)" }
+      ]
+    }
+  ]
+}
