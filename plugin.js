@@ -316,6 +316,8 @@ export async function home() {
 
   // Popular cosplay niches (category pages on cosxplay.com)
   const cats = [
+    ["59813-popular-costumes", "Popular Costumes", "/59813-popular-costumes/"],
+    ["12804-video-games", "Video Games", "/12804-video-games/"],
     ["31-cosplay", "Cosplay", "/tag/31-cosplay/"],
     ["11115-asian", "Asian", "/11115-asian/"],
     ["71061-femboy", "Femboy", "/71061-femboy/"],

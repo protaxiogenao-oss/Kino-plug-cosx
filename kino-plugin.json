@@ -1,10 +1,10 @@
 {
   "id": "cosxplay",
   "name": "CosXplay",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "apiVersion": 6,
   "entry": "plugin.js",
-  "description": "Cosplay de cosxplay.com. Solo +18. Home con tags favoritos y fila 2B. MP4 high/low y navegador oculto.",
+  "description": "Cosplay de cosxplay.com. Solo +18. Popular Costumes, Video Games, tags favoritos y fila 2B.",
   "author": "community",
   "homepage": "https://cosxplay.com",
   "icon": "icon.png",
