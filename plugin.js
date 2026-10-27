@@ -1,14 +1,15 @@
 /// <reference path="./kino.d.ts" />
 
 /**
- * CosXplay (cosxplay.com) for Kino v1.0.0
+ * CosXplay (cosxplay.com) for Kino v1.1.0
  * Same capabilities as 123AV: search / home / browse / resolve,
- * quality setting, streamHosts any, optional browser.capture.
+ * quality setting, streamHosts any, browser.capture with full headers.
  *
  * Listings: WordPress cards with data-post-id + 320x180 thumbs.
  * Filters: /?filter=latest|most-viewed|best|longest
  * Categories: /{id}-{slug}/ e.g. 7841-nier-automata (2B)
- * Resolve: <source title="high|low"> on nosofiles.com MP4 (+ browser fallback)
+ * Resolve: browser.capture → pass media.headers+Cookie (needed on Android TV
+ * to avoid CDN 403); HTML <source high|low> as fallback.
  */
 
 const BASE = "https://cosxplay.com";
@@ -401,7 +402,6 @@ export async function browse(ref, cursor) {
 function extractStreams(html) {
   const high = [];
   const low = [];
-  // <source src="..." type="video/mp4" title="high">
   const re =
     /<source[^>]+src="(https?:\/\/[^"]+)"[^>]*(?:title="(high|low)"|type="video\/mp4")[^>]*>/gi;
   let m;
@@ -412,7 +412,6 @@ function extractStreams(html) {
     if (title === "low" || /_low\.mp4/i.test(url)) low.push(url);
     else high.push(url);
   }
-  // Fallback bare mp4 on nosofiles
   if (!high.length && !low.length) {
     const all = html.match(
       /https?:\/\/[^"'<\s]+nosofiles\.com[^"'<\s]+\.mp4[^"'<\s]*/gi
@@ -429,10 +428,96 @@ function extractStreams(html) {
   return { high: high, low: low };
 }
 
+/**
+ * Build stream headers for the player.
+ * Kino docs: without the capture request's headers + page cookies, CDNs answer 403.
+ * Cap at 20 headers; never set Range / Accept-Encoding.
+ */
+function buildStreamHeaders(media, page, pageUrl) {
+  const out = {};
+  const src = (media && media.headers) || {};
+  const keys = Object.keys(src);
+  for (let i = 0; i < keys.length; i++) {
+    const k = keys[i];
+    const kl = k.toLowerCase();
+    if (
+      kl === "range" ||
+      kl === "accept-encoding" ||
+      kl === "host" ||
+      kl === "content-length" ||
+      kl === "connection"
+    ) {
+      continue;
+    }
+    if (src[k] != null && src[k] !== "") out[k] = String(src[k]);
+  }
+
+  // Cookie: prefer media headers, else page.cookies for the media host
+  if (!out.Cookie && !out.cookie) {
+    const cookies = (page && page.cookies) || [];
+    if (cookies.length && media && media.url) {
+      try {
+        const host = String(media.url).split("/")[2] || "";
+        const parts = [];
+        for (let i = 0; i < cookies.length; i++) {
+          const c = cookies[i];
+          if (!c || !c.name) continue;
+          const dh = String(c.domain || "").replace(/^\./, "");
+          if (!dh || host.indexOf(dh) >= 0 || dh.indexOf(host) >= 0) {
+            parts.push(c.name + "=" + (c.value || ""));
+          }
+        }
+        if (parts.length) out.Cookie = parts.join("; ");
+      } catch (_) {}
+    }
+  }
+
+  if (!out.Referer && !out.referer) {
+    out.Referer = (page && page.finalUrl) || pageUrl;
+  }
+  if (!out.Origin && !out.origin) {
+    out.Origin = BASE;
+  }
+  if (!out["User-Agent"] && !out["user-agent"]) {
+    // Match a real browser UA — some CDNs reject empty / Kino default on TV WebView
+    out["User-Agent"] = UA;
+  }
+  if (!out.Accept && !out.accept) {
+    out.Accept = "*/*";
+  }
+  if (!out["Accept-Language"] && !out["accept-language"]) {
+    out["Accept-Language"] = "en-US,en;q=0.9";
+  }
+
+  // Max 20 headers (Kino contract)
+  const final = {};
+  const fk = Object.keys(out);
+  for (let i = 0; i < fk.length && i < 20; i++) final[fk[i]] = out[fk[i]];
+  return final;
+}
+
+function scoreMedia(url) {
+  let s = 0;
+  if (/_high\.mp4/i.test(url)) s += 4;
+  if (/_low\.mp4/i.test(url)) s += 1;
+  if (/verify=/i.test(url)) s += 2;
+  if (/trailer/i.test(url)) s -= 10;
+  return s;
+}
+
+function mediaToStream(media, page, pageUrl, label) {
+  const headers = buildStreamHeaders(media, page, pageUrl);
+  return {
+    url: media.url,
+    mime: "video/mp4",
+    headers: headers,
+    label: label || (/_high/i.test(media.url) ? "Alta" : /_low/i.test(media.url) ? "Baja" : "MP4"),
+  };
+}
+
 export async function resolve(ref) {
   await null;
   let slug = String(ref || "").trim();
-  // "67084-some-slug" or full URL or bare id
   const um = slug.match(/(\d{3,})-([a-z0-9-]+)/i);
   const idOnly = slug.match(/^(\d{4,})$/);
   let path;
@@ -447,70 +532,128 @@ export async function resolve(ref) {
   }
 
   const pageUrl = BASE + path;
+  const pref = preferredQuality();
+  const isTv = typeof kino.device === "string" && kino.device === "tv";
 
-  // Prefer browser capture when available (CDN often checks client TLS / cookies)
+  // --- 1) browser.capture (required path for nosofiles CDN on many devices) ---
   if (kino.browser && typeof kino.browser.capture === "function") {
     try {
-      const page = await kino.browser.capture(pageUrl, {
+      const captureOpts = {
         timeoutMs: 25000,
         autoplay: true,
         match: "nosofiles|\\.mp4",
-      });
+      };
+      // Kino 0.9.54+: collect every match so high+low are both available
+      try {
+        captureOpts.all = true;
+      } catch (_) {}
+
+      const page = await kino.browser.capture(pageUrl, captureOpts);
       const media = (page && page.media) || [];
       const playable = media.filter(function (x) {
-        return x && x.url && /\.mp4/i.test(x.url) && !/trailer/i.test(x.url);
+        return (
+          x &&
+          x.url &&
+          /\.mp4/i.test(x.url) &&
+          !/trailer/i.test(x.url) &&
+          /nosofiles|\.mp4/i.test(x.url)
+        );
       });
+
+      log(
+        "capture media",
+        playable.length,
+        playable.map(function (m) {
+          return (m.url || "").slice(-40);
+        }).join("|"),
+        "hdrKeys",
+        playable[0] && playable[0].headers
+          ? Object.keys(playable[0].headers).join(",")
+          : "none"
+      );
+
       if (playable.length) {
         playable.sort(function (a, b) {
-          const score = (u) =>
-            (/_high\.mp4/i.test(u) ? 3 : 0) + (/_low\.mp4/i.test(u) ? 1 : 2);
-          return score(b.url) - score(a.url);
+          return scoreMedia(b.url) - scoreMedia(a.url);
         });
-        const pref = preferredQuality();
+
         let pick = playable[0];
         if (pref === "low") {
-          const lo = playable.find((x) => /_low\.mp4/i.test(x.url));
+          const lo = playable.find(function (x) {
+            return /_low\.mp4/i.test(x.url);
+          });
           if (lo) pick = lo;
         } else {
-          const hi = playable.find((x) => /_high\.mp4/i.test(x.url));
+          const hi = playable.find(function (x) {
+            return /_high\.mp4/i.test(x.url);
+          });
           if (hi) pick = hi;
         }
-        const hdrs = Object.assign({}, pick.headers || {});
-        if (!hdrs.Referer) hdrs.Referer = page.finalUrl || pageUrl;
-        if (!hdrs["User-Agent"]) hdrs["User-Agent"] = UA;
-        const alternatives = playable
-          .filter((x) => x.url !== pick.url)
-          .slice(0, 4)
-          .map(function (x, i) {
-            return {
-              url: x.url,
-              label: /_low/.test(x.url) ? "Baja" : "Alt " + (i + 1),
-              headers: x.headers || hdrs,
-              mime: "video/mp4",
-            };
-          });
-        return {
-          url: pick.url,
-          mime: "video/mp4",
-          headers: hdrs,
-          label: /_high/.test(pick.url) ? "Alta" : "MP4",
-          alternatives: alternatives.length ? alternatives : undefined,
-        };
+
+        // On TV prefer the capture's own request headers strictly (CDN 403 otherwise)
+        const primary = mediaToStream(pick, page, pageUrl);
+        const alternatives = [];
+        for (let i = 0; i < playable.length; i++) {
+          if (playable[i].url === pick.url) continue;
+          alternatives.push(
+            mediaToStream(
+              playable[i],
+              page,
+              pageUrl,
+              /_low/i.test(playable[i].url) ? "Baja" : "Alt " + (alternatives.length + 1)
+            )
+          );
+          if (alternatives.length >= 4) break;
+        }
+
+        // Second capture pass only on TV if primary headers look empty (old WebView)
+        if (
+          isTv &&
+          (!pick.headers || !Object.keys(pick.headers).length) &&
+          alternatives.length === 0
+        ) {
+          log("tv capture had empty headers, retry once");
+          try {
+            const page2 = await kino.browser.capture(pageUrl, {
+              timeoutMs: 20000,
+              autoplay: true,
+              match: "nosofiles.*\\.mp4",
+            });
+            const m2 = ((page2 && page2.media) || []).filter(function (x) {
+              return x && x.url && /\.mp4/i.test(x.url) && !/trailer/i.test(x.url);
+            });
+            if (m2.length) {
+              m2.sort(function (a, b) {
+                return scoreMedia(b.url) - scoreMedia(a.url);
+              });
+              return mediaToStream(m2[0], page2, pageUrl);
+            }
+          } catch (e2) {
+            log("capture retry", e2.message || e2);
+          }
+        }
+
+        if (alternatives.length) primary.alternatives = alternatives;
+        return primary;
       }
     } catch (e) {
       log("browser.capture", e.code || "", e.message || e);
+      // browser_unavailable on some TVs → fall through to HTML
     }
   }
 
+  // --- 2) HTML scrape fallback ---
   let html;
   try {
     html = (await fetchHtml(path)).html;
   } catch (e) {
-    throw kino.error("unavailable", e.message || "no se cargó el vídeo");
+    throw kino.error("unavailable", e.message || "no se cargó el vídeo", {
+      userMessage:
+        "No se pudo abrir el vídeo. En la TV Xiaomi a veces el CDN bloquea (403); prueba en el teléfono o actualiza Kino.",
+    });
   }
 
   const streams = extractStreams(html);
-  const pref = preferredQuality();
   let url = null;
   let label = "MP4";
   if (pref === "low") {
@@ -528,12 +671,13 @@ export async function resolve(ref) {
 
   const streamHeaders = {
     Referer: pageUrl,
-    "User-Agent": UA,
     Origin: BASE,
+    "User-Agent": UA,
+    Accept: "*/*",
+    "Accept-Language": "en-US,en;q=0.9",
   };
   const alternatives = [];
-  const other =
-    url === streams.high[0] ? streams.low[0] : streams.high[0];
+  const other = url === streams.high[0] ? streams.low[0] : streams.high[0];
   if (other && other !== url) {
     alternatives.push({
       url: other,

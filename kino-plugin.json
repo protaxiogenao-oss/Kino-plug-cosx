@@ -1,10 +1,10 @@
 {
   "id": "cosxplay",
   "name": "CosXplay",
-  "version": "1.0.1",
+  "version": "1.1.0",
   "apiVersion": 6,
   "entry": "plugin.js",
-  "description": "Cosplay de cosxplay.com. Solo +18. Popular Costumes, Video Games, tags favoritos y fila 2B.",
+  "description": "Cosplay de cosxplay.com. Solo +18. Resolve con headers/cookies del browser (fix 403 en Android TV).",
   "author": "community",
   "homepage": "https://cosxplay.com",
   "icon": "icon.png",
@@ -15,12 +15,22 @@
     "nosofiles.com",
     "*.nosofiles.com",
     "xcdn1.nosofiles.com",
-    "st1.nosofiles.com"
+    "xcdn2.nosofiles.com",
+    "xcdn3.nosofiles.com",
+    "st1.nosofiles.com",
+    "st2.nosofiles.com"
   ],
   "streamHosts": "any",
   "browser": true,
-  "capabilities": ["search", "home", "browse", "resolve"],
-  "categories": ["adult"],
+  "capabilities": [
+    "search",
+    "home",
+    "browse",
+    "resolve"
+  ],
+  "categories": [
+    "adult"
+  ],
   "color": "#AD1457",
   "settings": [
     {
@@ -29,8 +39,14 @@
       "type": "select",
       "default": "high",
       "options": [
-        { "value": "high", "label": "Alta (high)" },
-        { "value": "low", "label": "Baja (ahorro de datos)" }
+        {
+          "value": "high",
+          "label": "Alta (high)"
+        },
+        {
+          "value": "low",
+          "label": "Baja (ahorro de datos)"
+        }
       ]
     }
   ]
