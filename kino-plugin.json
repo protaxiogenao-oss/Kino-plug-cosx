@@ -1,11 +1,11 @@
 {
   "id": "cosxplay",
   "name": "CosXplay",
-  "version": "1.1.0",
+  "version": "1.2.0",
   "apiVersion": 6,
   "entry": "plugin.js",
-  "description": "Cosplay de cosxplay.com. Solo +18. Resolve con headers/cookies del browser (fix 403 en Android TV).",
-  "author": "community",
+  "description": "Hecho por Hotaru Yume. Cosplay de cosxplay.com. Solo +18.",
+  "author": "Hotaru Yume",
   "homepage": "https://cosxplay.com",
   "icon": "icon.png",
   "hosts": [

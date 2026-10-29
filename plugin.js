@@ -1,9 +1,9 @@
 /// <reference path="./kino.d.ts" />
 
 /**
- * CosXplay (cosxplay.com) for Kino v1.1.0
+ * CosXplay (cosxplay.com) for Kino v1.2.0
  * Same capabilities as 123AV: search / home / browse / resolve,
- * quality setting, streamHosts any, browser.capture with full headers.
+ * quality setting, streamHosts any, captureAll + headers exactos + retry 403 (manual Kino).
  *
  * Listings: WordPress cards with data-post-id + 320x180 thumbs.
  * Filters: /?filter=latest|most-viewed|best|longest
@@ -429,9 +429,9 @@ function extractStreams(html) {
 }
 
 /**
- * Build stream headers for the player.
- * Kino docs: without the capture request's headers + page cookies, CDNs answer 403.
- * Cap at 20 headers; never set Range / Accept-Encoding.
+ * Pass capture headers to the player EXACTLY as Kino documented:
+ * media.headers already include the page request headers + cookies for that URL.
+ * Do not invent Range / Accept-Encoding. Cap at 20.
  */
 function buildStreamHeaders(media, page, pageUrl) {
   const out = {};
@@ -439,20 +439,21 @@ function buildStreamHeaders(media, page, pageUrl) {
   const keys = Object.keys(src);
   for (let i = 0; i < keys.length; i++) {
     const k = keys[i];
-    const kl = k.toLowerCase();
+    const kl = String(k).toLowerCase();
     if (
       kl === "range" ||
       kl === "accept-encoding" ||
       kl === "host" ||
       kl === "content-length" ||
-      kl === "connection"
+      kl === "connection" ||
+      kl === "cookie2"
     ) {
       continue;
     }
-    if (src[k] != null && src[k] !== "") out[k] = String(src[k]);
+    if (src[k] != null && String(src[k]) !== "") out[k] = String(src[k]);
   }
 
-  // Cookie: prefer media headers, else page.cookies for the media host
+  // Fallback Cookie from page.cookies / page.requests (0.9.54+)
   if (!out.Cookie && !out.cookie) {
     const cookies = (page && page.cookies) || [];
     if (cookies.length && media && media.url) {
@@ -479,7 +480,6 @@ function buildStreamHeaders(media, page, pageUrl) {
     out.Origin = BASE;
   }
   if (!out["User-Agent"] && !out["user-agent"]) {
-    // Match a real browser UA — some CDNs reject empty / Kino default on TV WebView
     out["User-Agent"] = UA;
   }
   if (!out.Accept && !out.accept) {
@@ -489,147 +489,166 @@ function buildStreamHeaders(media, page, pageUrl) {
     out["Accept-Language"] = "en-US,en;q=0.9";
   }
 
-  // Max 20 headers (Kino contract)
   const final = {};
   const fk = Object.keys(out);
   for (let i = 0; i < fk.length && i < 20; i++) final[fk[i]] = out[fk[i]];
   return final;
 }
 
-function scoreMedia(url) {
+function scoreMedia(url, preferLow) {
   let s = 0;
-  if (/_high\.mp4/i.test(url)) s += 4;
-  if (/_low\.mp4/i.test(url)) s += 1;
+  if (/_high\.mp4/i.test(url)) s += preferLow ? 1 : 5;
+  if (/_low\.mp4/i.test(url)) s += preferLow ? 5 : 2;
   if (/verify=/i.test(url)) s += 2;
-  if (/trailer/i.test(url)) s -= 10;
+  if (/trailer/i.test(url)) s -= 20;
   return s;
 }
 
 function mediaToStream(media, page, pageUrl, label) {
-  const headers = buildStreamHeaders(media, page, pageUrl);
   return {
     url: media.url,
     mime: "video/mp4",
-    headers: headers,
-    label: label || (/_high/i.test(media.url) ? "Alta" : /_low/i.test(media.url) ? "Baja" : "MP4"),
+    headers: buildStreamHeaders(media, page, pageUrl),
+    label:
+      label ||
+      (/_high/i.test(media.url)
+        ? "Alta"
+        : /_low/i.test(media.url)
+          ? "Baja"
+          : "MP4"),
+    // Signed verify= URLs expire; ask Kino to re-resolve before they go stale
+    expiresInSeconds: /verify=/i.test(media.url) ? 900 : 1800,
   };
 }
 
-export async function resolve(ref) {
-  await null;
+function parseRefPath(ref) {
   let slug = String(ref || "").trim();
   const um = slug.match(/(\d{3,})-([a-z0-9-]+)/i);
   const idOnly = slug.match(/^(\d{4,})$/);
-  let path;
-  if (um) {
-    path = "/" + um[1] + "-" + um[2] + "/";
-  } else if (idOnly) {
-    path = "/?p=" + idOnly[1];
-  } else if (/cosxplay\.com\//i.test(slug)) {
-    path = slug.replace(/^https?:\/\/[^/]+/i, "");
-  } else {
-    path = "/" + slug.replace(/^\/+/, "") + "/";
+  if (um) return "/" + um[1] + "-" + um[2] + "/";
+  if (idOnly) return "/?p=" + idOnly[1];
+  if (/cosxplay\.com\//i.test(slug)) {
+    return slug.replace(/^https?:\/\/[^/]+/i, "");
   }
+  return "/" + slug.replace(/^\/+/, "") + "/";
+}
 
+function collectPlayable(page) {
+  const media = (page && page.media) || [];
+  // Also dig page.requests when captureAll is on (Kino 0.9.54)
+  const extra = (page && page.requests) || [];
+  const all = media.concat(extra);
+  const seen = {};
+  const out = [];
+  for (let i = 0; i < all.length; i++) {
+    const x = all[i];
+    if (!x || !x.url) continue;
+    if (seen[x.url]) continue;
+    if (!/\.mp4/i.test(x.url)) continue;
+    if (/trailer/i.test(x.url)) continue;
+    seen[x.url] = true;
+    out.push(x);
+  }
+  return out;
+}
+
+async function captureVideo(pageUrl) {
+  const opts = {
+    timeoutMs: 25000,
+    autoplay: true,
+    match: "nosofiles.*\\.mp4|xcdn.*\\.mp4|_high\\.mp4|_low\\.mp4",
+  };
+  // Official Kino 0.9.54 flags (feature-detect; older Kino ignores unknown keys poorly — gate them)
+  if (kino.browser && kino.browser.captureAll === true) {
+    opts.captureAll = true;
+    opts.alsoMatch = ["\\.mp4"];
+    opts.returnCookiesOnTimeout = true;
+  }
+  return kino.browser.capture(pageUrl, opts);
+}
+
+/**
+ * resolve(ref, ctx?)
+ * ctx.retry is set by Kino on 401/403/409 so we re-capture a fresh signed URL.
+ */
+export async function resolve(ref, ctx) {
+  await null;
+  const path = parseRefPath(ref);
   const pageUrl = BASE + path;
   const pref = preferredQuality();
   const isTv = typeof kino.device === "string" && kino.device === "tv";
+  // On TV prefer low first when user asked high but CDN is strict — still offer high as alt
+  const preferLow = pref === "low" || (isTv && pref !== "high");
+  const retry =
+    ctx && ctx.retry
+      ? ctx.retry
+      : null;
+  if (retry) {
+    log("resolve retry", retry.reason || "", retry.status || "", "attempt", retry.attempt || 1);
+  }
 
-  // --- 1) browser.capture (required path for nosofiles CDN on many devices) ---
+  // --- 1) browser.capture -------------------------------------------------
   if (kino.browser && typeof kino.browser.capture === "function") {
     try {
-      const captureOpts = {
-        timeoutMs: 25000,
-        autoplay: true,
-        match: "nosofiles|\\.mp4",
-      };
-      // Kino 0.9.54+: collect every match so high+low are both available
-      try {
-        captureOpts.all = true;
-      } catch (_) {}
-
-      const page = await kino.browser.capture(pageUrl, captureOpts);
-      const media = (page && page.media) || [];
-      const playable = media.filter(function (x) {
-        return (
-          x &&
-          x.url &&
-          /\.mp4/i.test(x.url) &&
-          !/trailer/i.test(x.url) &&
-          /nosofiles|\.mp4/i.test(x.url)
-        );
-      });
-
+      const page = await captureVideo(pageUrl);
+      let playable = collectPlayable(page);
       log(
-        "capture media",
+        "capture",
         playable.length,
-        playable.map(function (m) {
-          return (m.url || "").slice(-40);
-        }).join("|"),
-        "hdrKeys",
+        "hdr",
         playable[0] && playable[0].headers
           ? Object.keys(playable[0].headers).join(",")
-          : "none"
+          : "none",
+        isTv ? "tv" : "phone"
       );
 
       if (playable.length) {
         playable.sort(function (a, b) {
-          return scoreMedia(b.url) - scoreMedia(a.url);
+          return scoreMedia(b.url, preferLow) - scoreMedia(a.url, preferLow);
         });
 
-        let pick = playable[0];
-        if (pref === "low") {
-          const lo = playable.find(function (x) {
-            return /_low\.mp4/i.test(x.url);
-          });
-          if (lo) pick = lo;
-        } else {
-          const hi = playable.find(function (x) {
-            return /_high\.mp4/i.test(x.url);
-          });
-          if (hi) pick = hi;
-        }
-
-        // On TV prefer the capture's own request headers strictly (CDN 403 otherwise)
-        const primary = mediaToStream(pick, page, pageUrl);
+        const primary = mediaToStream(playable[0], page, pageUrl);
         const alternatives = [];
-        for (let i = 0; i < playable.length; i++) {
-          if (playable[i].url === pick.url) continue;
+        for (let i = 1; i < playable.length && alternatives.length < 7; i++) {
           alternatives.push(
             mediaToStream(
               playable[i],
               page,
               pageUrl,
-              /_low/i.test(playable[i].url) ? "Baja" : "Alt " + (alternatives.length + 1)
+              /_low/i.test(playable[i].url)
+                ? "Baja"
+                : /_high/i.test(playable[i].url)
+                  ? "Alta"
+                  : "Alt " + i
             )
           );
-          if (alternatives.length >= 4) break;
         }
 
-        // Second capture pass only on TV if primary headers look empty (old WebView)
+        // If capture headers look empty on TV, one more capture can help flaky WebViews
         if (
           isTv &&
-          (!pick.headers || !Object.keys(pick.headers).length) &&
-          alternatives.length === 0
+          (!playable[0].headers || Object.keys(playable[0].headers).length < 2)
         ) {
-          log("tv capture had empty headers, retry once");
+          log("tv weak headers, second capture");
           try {
-            const page2 = await kino.browser.capture(pageUrl, {
-              timeoutMs: 20000,
-              autoplay: true,
-              match: "nosofiles.*\\.mp4",
-            });
-            const m2 = ((page2 && page2.media) || []).filter(function (x) {
-              return x && x.url && /\.mp4/i.test(x.url) && !/trailer/i.test(x.url);
-            });
-            if (m2.length) {
-              m2.sort(function (a, b) {
-                return scoreMedia(b.url) - scoreMedia(a.url);
+            const page2 = await captureVideo(pageUrl);
+            const p2 = collectPlayable(page2);
+            if (p2.length) {
+              p2.sort(function (a, b) {
+                return scoreMedia(b.url, preferLow) - scoreMedia(a.url, preferLow);
               });
-              return mediaToStream(m2[0], page2, pageUrl);
+              const s2 = mediaToStream(p2[0], page2, pageUrl);
+              // Prefer the one that actually brought headers
+              if (p2[0].headers && Object.keys(p2[0].headers).length >= 2) {
+                if (alternatives.length < 7) {
+                  alternatives.unshift(primary);
+                }
+                s2.alternatives = alternatives.slice(0, 7);
+                return s2;
+              }
             }
           } catch (e2) {
-            log("capture retry", e2.message || e2);
+            log("second capture", e2.message || e2);
           }
         }
 
@@ -638,25 +657,31 @@ export async function resolve(ref) {
       }
     } catch (e) {
       log("browser.capture", e.code || "", e.message || e);
-      // browser_unavailable on some TVs → fall through to HTML
+      // browser_unavailable / busy / blocked → HTML fallback
+      if (e && e.code === "blocked") {
+        throw kino.error("unavailable", "cloudflare blocked", {
+          userMessage:
+            "CosXplay pidió verificación humana. Kino no puede completar captchas.",
+        });
+      }
     }
   }
 
-  // --- 2) HTML scrape fallback ---
+  // --- 2) HTML fallback (often 403 on TV without capture headers) ---------
   let html;
   try {
     html = (await fetchHtml(path)).html;
   } catch (e) {
     throw kino.error("unavailable", e.message || "no se cargó el vídeo", {
       userMessage:
-        "No se pudo abrir el vídeo. En la TV Xiaomi a veces el CDN bloquea (403); prueba en el teléfono o actualiza Kino.",
+        "No se pudo abrir el vídeo. En Xiaomi TV el CDN a veces responde 403; prueba en el teléfono.",
     });
   }
 
   const streams = extractStreams(html);
   let url = null;
   let label = "MP4";
-  if (pref === "low") {
+  if (pref === "low" || (isTv && !streams.high[0])) {
     url = streams.low[0] || streams.high[0];
     label = streams.low[0] ? "Baja" : "Alta";
   } else {
@@ -664,7 +689,7 @@ export async function resolve(ref) {
     label = streams.high[0] ? "Alta" : "Baja";
   }
   if (!url) {
-    throw kino.error("unavailable", "sin MP4 en la página", {
+    throw kino.error("unavailable", "sin MP4", {
       userMessage: "No se encontró el archivo de vídeo de este título.",
     });
   }
@@ -692,6 +717,7 @@ export async function resolve(ref) {
     mime: "video/mp4",
     headers: streamHeaders,
     label: label,
+    expiresInSeconds: 900,
     alternatives: alternatives.length ? alternatives : undefined,
   };
 }
