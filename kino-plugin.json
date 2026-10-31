@@ -4,8 +4,9 @@
   "version": "1.3.0",
   "apiVersion": 6,
   "entry": "plugin.js",
-  "description": "Hecho por Hotaru Yume. Cosplay de cosxplay.com. Solo +18. Headers estilo CloudStream.",
+  "description": "Videos de cosxplay.com. Solo +18. Headers estilo CloudStream.",
   "author": "Hotaru Yume",
+  "creator": "hotaruyume",
   "homepage": "https://cosxplay.com",
   "icon": "icon.png",
   "hosts": [
